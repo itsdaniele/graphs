@@ -9,6 +9,8 @@ from pytorch_lightning import (
     Trainer,
     seed_everything,
 )
+
+import torch.nn
 from pytorch_lightning.loggers import LightningLoggerBase
 
 from src import utils
@@ -35,9 +37,15 @@ def train(config: DictConfig) -> Optional[float]:
     log.info(f"Instantiating datamodule <{config.datamodule._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(config.datamodule)
 
+    # architecture
+    log.info(f"Instantiating model architecture <{config.model.architecture._target_}>")
+    arch: torch.nn.Module = hydra.utils.instantiate(config.model.architecture)
+
     # Init lightning model
-    log.info(f"Instantiating model <{config.model._target_}>")
-    model: LightningModule = hydra.utils.instantiate(config.model)
+    log.info(f"Instantiating model <{config.model.lightning_module._target_}>")
+    model: LightningModule = hydra.utils.instantiate(
+        config.model.lightning_module, model=arch, datamodule=datamodule
+    )
 
     # Init lightning callbacks
     callbacks: List[Callback] = []

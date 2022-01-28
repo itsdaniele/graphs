@@ -1,75 +1,83 @@
 from typing import Any, List
+from xml.etree.ElementTree import TreeBuilder
 
 import torch
-from pytorch_lightning import LightningModule
+import torch.nn as nn
+import torch.nn.functional as F
+from pytorch_lightning import LightningModule, LightningDataModule
 from torchmetrics import MaxMetric
-from torchmetrics.classification.accuracy import Accuracy
-
-from src.models.components.simple_dense_net import SimpleDenseNet
+from torchmetrics import F1Score
 
 
-class MNISTLitModule(LightningModule):
-    """
-    Example of LightningModule for MNIST classification.
-
-    A LightningModule organizes your PyTorch code into 5 sections:
-        - Computations (init).
-        - Train loop (training_step)
-        - Validation loop (validation_step)
-        - Test loop (test_step)
-        - Optimizers (configure_optimizers)
-
-    Read the docs:
-        https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html
-    """
-
+class GraphClassificationModule(LightningModule):
     def __init__(
         self,
-        input_size: int = 784,
-        lin1_size: int = 256,
-        lin2_size: int = 256,
-        lin3_size: int = 256,
-        output_size: int = 10,
+        model: torch.nn.Module = None,
+        datamodule: LightningDataModule = None,
+        pool_method: str = "add",
+        output_head=True,
+        num_tasks=None,
         lr: float = 0.001,
-        weight_decay: float = 0.0005,
+        weight_decay: float = 0,
+        criterion=None,
+        **kwargs,
     ):
         super().__init__()
+
+        self.model = model
 
         # this line allows to access init params with 'self.hparams' attribute
         # it also ensures init params will be stored in ckpt
         self.save_hyperparameters(logger=False)
 
-        self.model = SimpleDenseNet(hparams=self.hparams)
-
-        # loss function
-        self.criterion = torch.nn.CrossEntropyLoss()
-
         # use separate metric instance for train, val and test step
         # to ensure a proper reduction over the epoch
-        self.train_acc = Accuracy()
-        self.val_acc = Accuracy()
-        self.test_acc = Accuracy()
 
-        # for logging best so far validation accuracy
-        self.val_acc_best = MaxMetric()
+        if self.hparams.datamodule.dataset == "ppi":
+            self.train_f1 = F1Score()
+            self.val_f1 = F1Score()
+            self.test_f1 = F1Score()
+
+            # for logging best so far validation accuracy
+            self.val_f1_best = MaxMetric()
+
+        if pool_method == "add":
+            self.pool_fn = lambda x: x.sum(1)
+        elif pool_method is None:
+            self.pool_fn = lambda x: x
+
+        if output_head is True:
+            self.output_head = nn.Linear(self.model.hidden_dim, num_tasks)
+
+        if criterion == "bce":
+            self.loss_fn = torch.nn.BCEWithLogitsLoss()
 
     def forward(self, x: torch.Tensor):
         return self.model(x)
 
     def step(self, batch: Any):
-        x, y = batch
-        logits = self.forward(x)
-        loss = self.criterion(logits, y)
-        preds = torch.argmax(logits, dim=1)
-        return loss, preds, y
+
+        out = self.hparams.model(batch)
+
+        if self.hparams.pool_method is not None:
+            preds = self.pool_fn(out)
+        else:
+            preds = out
+
+        if self.hparams.output_head:
+            preds = self.output_head(preds)
+
+        loss = self.loss_fn(preds, batch.y)
+
+        return loss, preds, batch.y
 
     def training_step(self, batch: Any, batch_idx: int):
         loss, preds, targets = self.step(batch)
 
         # log train metrics
-        acc = self.train_acc(preds, targets)
+        acc = self.train_f1((F.sigmoid(preds) > 0.5).float(), targets.long())
         self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
-        self.log("train/acc", acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("train/f1", acc, on_step=False, on_epoch=True, prog_bar=True)
 
         # we can return here dict with any tensors
         # and then read it in some callback or in `training_epoch_end()`` below
@@ -84,24 +92,26 @@ class MNISTLitModule(LightningModule):
         loss, preds, targets = self.step(batch)
 
         # log val metrics
-        acc = self.val_acc(preds, targets)
+        acc = self.val_f1((F.sigmoid(preds) > 0.5).float(), targets.long())
         self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
-        self.log("val/acc", acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val/f1", acc, on_step=False, on_epoch=True, prog_bar=True)
 
         return {"loss": loss, "preds": preds, "targets": targets}
 
     def validation_epoch_end(self, outputs: List[Any]):
-        acc = self.val_acc.compute()  # get val accuracy from current epoch
-        self.val_acc_best.update(acc)
-        self.log("val/acc_best", self.val_acc_best.compute(), on_epoch=True, prog_bar=True)
+        acc = self.val_f1.compute()  # get val accuracy from current epoch
+        self.val_f1_best.update(acc)
+        self.log(
+            "val/f1_best", self.val_f1_best.compute(), on_epoch=True, prog_bar=True
+        )
 
     def test_step(self, batch: Any, batch_idx: int):
         loss, preds, targets = self.step(batch)
 
         # log test metrics
-        acc = self.test_acc(preds, targets)
+        acc = self.test_f1(preds, targets)
         self.log("test/loss", loss, on_step=False, on_epoch=True)
-        self.log("test/acc", acc, on_step=False, on_epoch=True)
+        self.log("test/f1", acc, on_step=False, on_epoch=True)
 
         return {"loss": loss, "preds": preds, "targets": targets}
 
@@ -110,9 +120,9 @@ class MNISTLitModule(LightningModule):
 
     def on_epoch_end(self):
         # reset metrics at the end of every epoch
-        self.train_acc.reset()
-        self.test_acc.reset()
-        self.val_acc.reset()
+        self.train_f1.reset()
+        self.test_f1.reset()
+        self.val_f1.reset()
 
     def configure_optimizers(self):
         """Choose what optimizers and learning-rate schedulers to use in your optimization.
@@ -122,5 +132,7 @@ class MNISTLitModule(LightningModule):
             https://pytorch-lightning.readthedocs.io/en/latest/common/lightning_module.html#configure-optimizers
         """
         return torch.optim.Adam(
-            params=self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay
+            params=self.parameters(),
+            lr=self.hparams.lr,
+            weight_decay=self.hparams.weight_decay,
         )
