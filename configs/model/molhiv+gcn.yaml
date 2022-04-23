@@ -1,0 +1,14 @@
+
+lightning_module:
+  _target_: src.models.graph_classification_module.GraphClassificationModule
+  pool_method: null 
+  criterion: bce
+  output_head: true
+  num_tasks: 1
+
+architecture:
+  _target_: src.models.components.gcn.GCN
+
+  input_dim: 50
+  hidden_dim: 256
+  depth: 3

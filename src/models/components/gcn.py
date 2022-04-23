@@ -7,7 +7,12 @@ from .util import get_activation_fn
 
 class GCN(nn.Module):
     def __init__(
-        self, input_dim, hidden_dim, depth, skip_connections=False, activation="relu"
+        self,
+        input_dim,
+        hidden_dim,
+        depth,
+        skip_connections=False,
+        activation="relu",
     ):
         super().__init__()
 

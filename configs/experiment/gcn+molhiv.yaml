@@ -1,0 +1,27 @@
+# @package _global_
+
+# to execute this experiment run:
+# python run.py experiment=example
+
+defaults:
+  - override /mode: exp.yaml
+  - override /trainer: default.yaml
+  - override /model: ppi.yaml
+  - override /datamodule: molhiv.yaml
+  - override /callbacks: molhiv.yaml
+  - override /logger: wandb.yaml
+
+# all parameters below will be merged with parameters from default configurations set above
+# this allows you to overwrite only specified parameters
+
+# name of the run determines folder name in logs
+# can also be accessed by loggers
+name: "ppi+gcn"
+
+seed: 12345
+
+logger:
+  csv:
+    name: csv/${name}
+  wandb:
+    tags: ["ppi", "gcn"]

@@ -6,7 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from pytorch_lightning import LightningModule, LightningDataModule
 from torchmetrics import MaxMetric
-from torchmetrics import F1Score
+
+from .util import get_classifiation_metric
 
 
 class GraphClassificationModule(LightningModule):
@@ -33,13 +34,14 @@ class GraphClassificationModule(LightningModule):
         # use separate metric instance for train, val and test step
         # to ensure a proper reduction over the epoch
 
-        if self.hparams.datamodule.dataset == "ppi":
-            self.train_f1 = F1Score()
-            self.val_f1 = F1Score()
-            self.test_f1 = F1Score()
+        metric_cls, self.metric_name = get_classifiation_metric(
+            self.hparams.datamodule.dataset
+        )
 
-            # for logging best so far validation accuracy
-            self.val_f1_best = MaxMetric()
+        self.train_metric = metric_cls()
+        self.val_metric = metric_cls()
+        self.test_metric = metric_cls()
+        self.val_metric_best = MaxMetric()
 
         if pool_method == "add":
             self.pool_fn = lambda x: x.sum(1)
@@ -75,9 +77,15 @@ class GraphClassificationModule(LightningModule):
         loss, preds, targets = self.step(batch)
 
         # log train metrics
-        acc = self.train_f1((F.sigmoid(preds) > 0.5).float(), targets.long())
+        metric = self.train_metric((F.sigmoid(preds) > 0.5).float(), targets.long())
         self.log("train/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
-        self.log("train/f1", acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log(
+            f"train/{self.metric_name}",
+            metric,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+        )
 
         # we can return here dict with any tensors
         # and then read it in some callback or in `training_epoch_end()`` below
@@ -92,26 +100,35 @@ class GraphClassificationModule(LightningModule):
         loss, preds, targets = self.step(batch)
 
         # log val metrics
-        acc = self.val_f1((F.sigmoid(preds) > 0.5).float(), targets.long())
+        metric = self.val_metric((F.sigmoid(preds) > 0.5).float(), targets.long())
         self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=False)
-        self.log("val/f1", acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log(
+            f"val/{self.metric_name}",
+            metric,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+        )
 
         return {"loss": loss, "preds": preds, "targets": targets}
 
     def validation_epoch_end(self, outputs: List[Any]):
-        acc = self.val_f1.compute()  # get val accuracy from current epoch
-        self.val_f1_best.update(acc)
+        metric = self.val_metric.compute()  # get val accuracy from current epoch
+        self.val_metric_best.update(metric)
         self.log(
-            "val/f1_best", self.val_f1_best.compute(), on_epoch=True, prog_bar=True
+            f"val/{self.metric_name}_best",
+            self.val_metric_best.compute(),
+            on_epoch=True,
+            prog_bar=True,
         )
 
     def test_step(self, batch: Any, batch_idx: int):
         loss, preds, targets = self.step(batch)
 
         # log test metrics
-        acc = self.test_f1(preds, targets)
+        metric = self.test_metric(preds, targets)
         self.log("test/loss", loss, on_step=False, on_epoch=True)
-        self.log("test/f1", acc, on_step=False, on_epoch=True)
+        self.log(f"test/{self.metric_name}", metric, on_step=False, on_epoch=True)
 
         return {"loss": loss, "preds": preds, "targets": targets}
 
@@ -120,9 +137,9 @@ class GraphClassificationModule(LightningModule):
 
     def on_epoch_end(self):
         # reset metrics at the end of every epoch
-        self.train_f1.reset()
-        self.test_f1.reset()
-        self.val_f1.reset()
+        self.train_metric.reset()
+        self.test_metric.reset()
+        self.val_metric.reset()
 
     def configure_optimizers(self):
         """Choose what optimizers and learning-rate schedulers to use in your optimization.
